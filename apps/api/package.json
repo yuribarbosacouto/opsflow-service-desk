@@ -22,6 +22,6 @@
     "@types/supertest": "^6.0.3",
     "supertest": "^7.1.4",
     "tsx": "^4.22.4",
-    "vitest": "^4.1.8"
+    "vitest": "^4.1.12"
   }
 }
