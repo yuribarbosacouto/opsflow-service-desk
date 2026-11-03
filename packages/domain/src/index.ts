@@ -54,6 +54,7 @@ export const updateTicketSchema = ticketSchema
     resolution: true
   })
   .partial()
+  .extend({ tags: z.array(z.string()).optional() })
   .refine((input) => Object.keys(input).length > 0, {
     message: "At least one field must be provided"
   });
@@ -405,7 +406,5 @@ export function getDueDateForPriority(priority: TicketPriority, createdAt = new 
     medium: 96,
     low: 168
   };
-  const dueAt = new Date(createdAt);
-  dueAt.setHours(dueAt.getHours() + hoursByPriority[priority]);
-  return dueAt.toISOString();
+  return new Date(createdAt.getTime() + hoursByPriority[priority] * 3_600_000).toISOString();
 }

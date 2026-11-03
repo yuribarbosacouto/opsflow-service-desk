@@ -8,10 +8,13 @@ const ticketEventArraySchema = ticketEventSchema.array();
 
 export type TicketRepository = {
   findAll: () => Promise<Ticket[]>;
+  findById: (id: string) => Promise<Ticket | undefined>;
   findEvents: (ticketId?: string) => Promise<TicketEvent[]>;
-  replaceAll: (tickets: Ticket[]) => Promise<void>;
-  appendEvent: (event: TicketEvent) => Promise<void>;
+  changeTicket: (id: string, change: ChangeTicket) => Promise<TicketChange | undefined>;
 };
+
+type TicketChange = { ticket: Ticket | null; event?: TicketEvent };
+type ChangeTicket = (current: Ticket | undefined) => TicketChange | undefined;
 
 type TicketRow = Omit<Ticket, "tags" | "resolution"> & {
   tags: string;
@@ -21,6 +24,10 @@ type TicketRow = Omit<Ticket, "tags" | "resolution"> & {
 type TicketEventRow = Omit<TicketEvent, "changes"> & {
   changes: string;
 };
+
+function parseTicketRow(row: TicketRow): Ticket {
+  return ticketSchema.parse({ ...row, tags: JSON.parse(row.tags), resolution: row.resolution ?? undefined });
+}
 
 function createSeedEvents(tickets: Ticket[]): TicketEvent[] {
   return tickets.flatMap((ticket) => {
@@ -64,9 +71,13 @@ export class SqliteTicketRepository implements TicketRepository {
   ) {
     mkdirSync(path.dirname(this.dbPath), { recursive: true });
     this.db = new DatabaseSync(this.dbPath);
+    this.db.exec("PRAGMA busy_timeout = 5000");
     this.createSchema();
     this.seedIfEmpty();
-    this.seedEventsIfEmpty();
+  }
+
+  close(): void {
+    this.db.close();
   }
 
   async findAll(): Promise<Ticket[]> {
@@ -77,11 +88,16 @@ export class SqliteTicketRepository implements TicketRepository {
       ORDER BY datetime(dueAt) ASC
     `).all() as TicketRow[];
 
-    return ticketArraySchema.parse(rows.map((row) => ({
-      ...row,
-      tags: JSON.parse(row.tags) as string[],
-      resolution: row.resolution ?? undefined
-    })));
+    return rows.map(parseTicketRow);
+  }
+
+  async findById(id: string): Promise<Ticket | undefined> {
+    return this.readTicket(id);
+  }
+
+  private readTicket(id: string): Ticket | undefined {
+    const row = this.db.prepare("SELECT * FROM tickets WHERE id = ?").get(id) as TicketRow | undefined;
+    return row && parseTicketRow(row);
   }
 
   async findEvents(ticketId?: string): Promise<TicketEvent[]> {
@@ -90,12 +106,12 @@ export class SqliteTicketRepository implements TicketRepository {
           SELECT id, ticketId, type, actor, message, changes, createdAt
           FROM ticket_events
           WHERE ticketId = ?
-          ORDER BY createdAt DESC
+          ORDER BY createdAt DESC, rowid DESC
         `).all(ticketId) as TicketEventRow[]
       : this.db.prepare(`
           SELECT id, ticketId, type, actor, message, changes, createdAt
           FROM ticket_events
-          ORDER BY createdAt DESC
+          ORDER BY createdAt DESC, rowid DESC
         `).all() as TicketEventRow[];
 
     return ticketEventArraySchema.parse(rows.map((row) => ({
@@ -104,45 +120,53 @@ export class SqliteTicketRepository implements TicketRepository {
     })));
   }
 
-  async replaceAll(tickets: Ticket[]): Promise<void> {
-    const parsedTickets = ticketArraySchema.parse(tickets);
-    const insert = this.db.prepare(`
+  async changeTicket(id: string, change: ChangeTicket): Promise<TicketChange | undefined> {
+    return this.transaction(() => {
+      const result = change(this.readTicket(id));
+      if (!result) return undefined;
+      if (result.ticket) {
+        this.writeTicket(result.ticket);
+      } else {
+        this.db.prepare("DELETE FROM tickets WHERE id = ?").run(id);
+      }
+      if (result.event) this.appendEvent(result.event);
+      return result;
+    });
+  }
+
+  private writeTicket(value: Ticket): void {
+    const ticket = ticketSchema.parse(value);
+    this.db.prepare(`
       INSERT INTO tickets (
         id, title, requester, department, category, priority, status, assignee,
         description, tags, createdAt, updatedAt, dueAt, resolution
       )
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `);
+      ON CONFLICT(id) DO UPDATE SET
+        title = excluded.title, requester = excluded.requester, department = excluded.department,
+        category = excluded.category, priority = excluded.priority, status = excluded.status,
+        assignee = excluded.assignee, description = excluded.description, tags = excluded.tags,
+        updatedAt = excluded.updatedAt, dueAt = excluded.dueAt, resolution = excluded.resolution
+    `).run(
+      ticket.id, ticket.title, ticket.requester, ticket.department, ticket.category, ticket.priority,
+      ticket.status, ticket.assignee, ticket.description, JSON.stringify(ticket.tags), ticket.createdAt,
+      ticket.updatedAt, ticket.dueAt, ticket.resolution ?? null
+    );
+  }
 
-    this.db.exec("BEGIN TRANSACTION");
+  private transaction<T>(operation: () => T): T {
+    this.db.exec("BEGIN IMMEDIATE");
     try {
-      this.db.exec("DELETE FROM tickets");
-      for (const ticket of parsedTickets) {
-        insert.run(
-          ticket.id,
-          ticket.title,
-          ticket.requester,
-          ticket.department,
-          ticket.category,
-          ticket.priority,
-          ticket.status,
-          ticket.assignee,
-          ticket.description,
-          JSON.stringify(ticket.tags),
-          ticket.createdAt,
-          ticket.updatedAt,
-          ticket.dueAt,
-          ticket.resolution ?? null
-        );
-      }
+      const result = operation();
       this.db.exec("COMMIT");
+      return result;
     } catch (error) {
       this.db.exec("ROLLBACK");
       throw error;
     }
   }
 
-  async appendEvent(event: TicketEvent): Promise<void> {
+  private appendEvent(event: TicketEvent): void {
     const parsedEvent = ticketEventSchema.parse(event);
     this.db.prepare(`
       INSERT INTO ticket_events (id, ticketId, type, actor, message, changes, createdAt)
@@ -198,77 +222,18 @@ export class SqliteTicketRepository implements TicketRepository {
   }
 
   private seedIfEmpty(): void {
-    const row = this.db.prepare("SELECT COUNT(*) AS total FROM tickets").get() as { total: number };
-    if (row.total > 0) {
-      return;
-    }
-
-    const seed = ticketArraySchema.parse(JSON.parse(readFileSync(this.seedPath, "utf-8")));
-    const insert = this.db.prepare(`
-      INSERT INTO tickets (
-        id, title, requester, department, category, priority, status, assignee,
-        description, tags, createdAt, updatedAt, dueAt, resolution
-      )
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `);
-
-    this.db.exec("BEGIN TRANSACTION");
-    try {
-      for (const ticket of seed) {
-        insert.run(
-          ticket.id,
-          ticket.title,
-          ticket.requester,
-          ticket.department,
-          ticket.category,
-          ticket.priority,
-          ticket.status,
-          ticket.assignee,
-          ticket.description,
-          JSON.stringify(ticket.tags),
-          ticket.createdAt,
-          ticket.updatedAt,
-          ticket.dueAt,
-          ticket.resolution ?? null
-        );
+    this.transaction(() => {
+      // Historical events remain after all tickets are deliberately deleted.
+      if (this.db.prepare("SELECT 1 FROM ticket_events LIMIT 1").get()) return;
+      const rows = this.db.prepare("SELECT * FROM tickets").all() as TicketRow[];
+      const tickets = rows.length > 0
+        ? rows.map(parseTicketRow)
+        : ticketArraySchema.parse(JSON.parse(readFileSync(this.seedPath, "utf-8")));
+      if (rows.length === 0) {
+        for (const ticket of tickets) this.writeTicket(ticket);
       }
-      this.db.exec("COMMIT");
-    } catch (error) {
-      this.db.exec("ROLLBACK");
-      throw error;
-    }
-  }
-
-  private seedEventsIfEmpty(): void {
-    const row = this.db.prepare("SELECT COUNT(*) AS total FROM ticket_events").get() as { total: number };
-    if (row.total > 0) {
-      return;
-    }
-
-    const tickets = ticketArraySchema.parse(JSON.parse(readFileSync(this.seedPath, "utf-8")));
-    const insert = this.db.prepare(`
-      INSERT INTO ticket_events (id, ticketId, type, actor, message, changes, createdAt)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
-    `);
-
-    this.db.exec("BEGIN TRANSACTION");
-    try {
-      for (const event of createSeedEvents(tickets)) {
-        insert.run(
-          event.id,
-          event.ticketId,
-          event.type,
-          event.actor,
-          event.message,
-          JSON.stringify(event.changes),
-          event.createdAt
-        );
-      }
-      this.db.exec("COMMIT");
-    } catch (error) {
-      this.db.exec("ROLLBACK");
-      throw error;
-    }
+      for (const event of createSeedEvents(tickets)) this.appendEvent(event);
+    });
   }
 }
 
@@ -280,6 +245,9 @@ export function createMemoryRepository(initialTickets: Ticket[]): TicketReposito
     async findAll() {
       return structuredClone(tickets);
     },
+    async findById(id) {
+      return structuredClone(tickets.find((ticket) => ticket.id === id));
+    },
     async findEvents(ticketId) {
       return structuredClone(
         events
@@ -287,11 +255,19 @@ export function createMemoryRepository(initialTickets: Ticket[]): TicketReposito
           .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
       );
     },
-    async replaceAll(nextTickets) {
-      tickets = ticketArraySchema.parse(nextTickets);
-    },
-    async appendEvent(event) {
-      events = ticketEventArraySchema.parse([ticketEventSchema.parse(event), ...events]);
+    async changeTicket(id, change) {
+      const current = tickets.find((ticket) => ticket.id === id);
+      const result = change(structuredClone(current));
+      if (!result) return undefined;
+      const ticket = result.ticket && ticketSchema.parse(result.ticket);
+      const event = result.event && ticketEventSchema.parse(result.event);
+      if (event && events.some(({ id }) => id === event.id)) {
+        throw new Error("Ticket event already exists");
+      }
+      tickets = tickets.filter((item) => item.id !== id);
+      if (ticket) tickets.unshift(ticket);
+      if (event) events.unshift(event);
+      return { ticket, event };
     }
   };
 }

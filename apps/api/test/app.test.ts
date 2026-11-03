@@ -1,7 +1,10 @@
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import request from "supertest";
 import { describe, expect, it } from "vitest";
 import { createApp } from "../src/app";
-import { createMemoryRepository } from "../src/repository";
+import { createMemoryRepository, SqliteTicketRepository } from "../src/repository";
 import type { Ticket } from "@opsflow/domain";
 
 const tickets: Ticket[] = [
@@ -29,6 +32,7 @@ describe("OpsFlow API", () => {
     await request(app).get("/api/tickets").set("Origin", "https://untrusted.example").expect(403);
     await request(app).delete("/api/tickets/tk-test-1").set("Origin", "https://untrusted.example").expect(403);
     await request(app).delete("/api/tickets/tk-test-1").set("Origin", "null").expect(403);
+    await request(app).delete("/api/tickets/tk-test-1").set("Host", "untrusted.example").expect(403);
     expect(await repository.findAll()).toHaveLength(1);
   });
 
@@ -57,6 +61,12 @@ describe("OpsFlow API", () => {
 
     expect(response.body.data).toHaveLength(1);
     expect(response.body.data[0].title).toContain("contratos");
+  });
+
+  it("rejects malformed JSON and ambiguous filters as client errors", async () => {
+    const app = createApp(createMemoryRepository(tickets));
+    await request(app).post("/api/tickets").type("json").send("{").expect(400).expect("Content-Type", /json/);
+    await request(app).get("/api/tickets?status=triage&status=waiting").expect(400);
   });
 
   it("returns dashboard insights", async () => {
@@ -104,6 +114,8 @@ describe("OpsFlow API", () => {
     expect(response.body.data.title).toBe("Automatizar painel administrativo");
     expect(response.body.data.status).toBe("waiting");
     expect(response.body.data.assignee).toBe("Carlos Lima");
+    expect(response.body.data.tags).toEqual(tickets[0]?.tags);
+    await request(app).put("/api/tickets/tk-test-1").send({}).expect(400);
 
     const events = await request(app).get("/api/tickets/tk-test-1/events").expect(200);
     expect(events.body.data.some((event: { type: string }) => event.type === "updated")).toBe(true);
@@ -149,5 +161,54 @@ describe("OpsFlow API", () => {
 
     const events = await request(app).get("/api/events").expect(200);
     expect(events.body.data[0].type).toBe("deleted");
+  });
+});
+
+describe("OpsFlow SQLite persistence", () => {
+  it("preserves concurrent edits and history after deleting the last ticket and restarting", async () => {
+    const directory = mkdtempSync(path.join(tmpdir(), "opsflow-sqlite-"));
+    const dbPath = path.join(directory, "tickets.sqlite");
+    const seedPath = path.join(directory, "seed.json");
+    writeFileSync(seedPath, JSON.stringify(tickets));
+    let repository = new SqliteTicketRepository(dbPath, seedPath);
+    try {
+      const app = createApp(repository);
+      await Promise.all([
+        request(app).put("/api/tickets/tk-test-1").send({ title: "Revisar painel de contratos" }).expect(200),
+        request(app).patch("/api/tickets/tk-test-1/status").send({ status: "waiting" }).expect(200)
+      ]);
+      const { body } = await request(app).get("/api/tickets/tk-test-1").expect(200);
+      expect(body.data).toMatchObject({ title: "Revisar painel de contratos", status: "waiting" });
+      expect((await repository.findEvents("tk-test-1")).map(({ type }) => type))
+        .toEqual(expect.arrayContaining(["updated", "status_changed"]));
+
+      await request(app).delete("/api/tickets/tk-test-1").expect(204);
+      repository.close();
+      repository = new SqliteTicketRepository(dbPath, seedPath);
+      expect(await repository.findAll()).toEqual([]);
+      expect((await repository.findEvents()).some(({ type }) => type === "deleted")).toBe(true);
+    } finally {
+      repository.close();
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("rolls back a ticket write if its audit event cannot be recorded", async () => {
+    const directory = mkdtempSync(path.join(tmpdir(), "opsflow-sqlite-"));
+    const seedPath = path.join(directory, "seed.json");
+    writeFileSync(seedPath, JSON.stringify(tickets));
+    const repository = new SqliteTicketRepository(path.join(directory, "tickets.sqlite"), seedPath);
+    try {
+      const [existingEvent] = await repository.findEvents("tk-test-1");
+      expect(existingEvent).toBeDefined();
+      await expect(repository.changeTicket("tk-test-1", (current) => current && {
+        ticket: { ...current, status: "waiting" },
+        event: existingEvent
+      })).rejects.toThrow();
+      expect(await repository.findById("tk-test-1")).toMatchObject({ status: "in_progress" });
+    } finally {
+      repository.close();
+      rmSync(directory, { recursive: true, force: true });
+    }
   });
 });

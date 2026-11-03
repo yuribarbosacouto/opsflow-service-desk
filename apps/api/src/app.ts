@@ -18,6 +18,7 @@ import {
 import type { TicketRepository } from "./repository";
 
 const actorName = "Yuri Barbosa";
+const loopbackHost = /^(?:localhost|127\.0\.0\.1|\[::1\])(?::\d{1,5})?$/i;
 
 function asyncRoute(handler: (req: Request, res: Response, next: NextFunction) => Promise<void>) {
   return (req: Request, res: Response, next: NextFunction) => {
@@ -28,8 +29,7 @@ function asyncRoute(handler: (req: Request, res: Response, next: NextFunction) =
 function normalizeFilters(query: Request["query"]): TicketFilters {
   const normalized = Object.fromEntries(
     Object.entries(query)
-      .filter(([, value]) => typeof value === "string" && value.length > 0)
-      .map(([key, value]) => [key, value])
+      .filter(([, value]) => value !== "")
   );
 
   return ticketFilterSchema.parse(normalized);
@@ -79,6 +79,10 @@ export function createApp(repository: TicketRepository) {
   ]);
   // Reject requests, not just CORS response headers, before any mutation runs.
   app.use((req, res, next) => {
+    if (!loopbackHost.test(req.get("host") ?? "")) {
+      res.status(403).json({ error: "Host not allowed" });
+      return;
+    }
     const origin = req.get("origin");
     if (origin && !allowedOrigins.has(origin)) {
       res.status(403).json({ error: "Origin not allowed" });
@@ -125,8 +129,7 @@ export function createApp(repository: TicketRepository) {
 
   app.get("/api/tickets/:id", asyncRoute(async (req, res) => {
     const ticketId = getTicketId(req);
-    const tickets = await repository.findAll();
-    const ticket = tickets.find((item) => item.id === ticketId);
+    const ticket = await repository.findById(ticketId);
 
     if (!ticket) {
       res.status(404).json({ error: "Tarefa não encontrada" });
@@ -138,8 +141,7 @@ export function createApp(repository: TicketRepository) {
 
   app.get("/api/tickets/:id/events", asyncRoute(async (req, res) => {
     const ticketId = getTicketId(req);
-    const tickets = await repository.findAll();
-    const ticket = tickets.find((item) => item.id === ticketId);
+    const ticket = await repository.findById(ticketId);
 
     if (!ticket) {
       res.status(404).json({ error: "Tarefa não encontrada" });
@@ -152,11 +154,10 @@ export function createApp(repository: TicketRepository) {
 
   app.post("/api/tickets", asyncRoute(async (req, res) => {
     const input = createTicketSchema.parse(req.body);
-    const tickets = await repository.findAll();
     const now = new Date();
 
     const ticket: Ticket = {
-      id: `tk-${randomUUID().slice(0, 8)}`,
+      id: `tk-${randomUUID()}`,
       ...input,
       status: "triage",
       createdAt: now.toISOString(),
@@ -164,16 +165,18 @@ export function createApp(repository: TicketRepository) {
       dueAt: input.dueAt ?? getDueDateForPriority(input.priority, now)
     };
 
-    await repository.replaceAll([ticket, ...tickets]);
-    await repository.appendEvent(createTicketEvent({
-      ticketId: ticket.id,
-      type: "created",
-      message: "Tarefa criada",
-      changes: [
-        `Responsável inicial: ${ticket.assignee}`,
-        `Prioridade inicial: ${ticket.priority}`,
-        `Prazo inicial: ${ticket.dueAt}`
-      ]
+    await repository.changeTicket(ticket.id, () => ({
+      ticket,
+      event: createTicketEvent({
+        ticketId: ticket.id,
+        type: "created",
+        message: "Tarefa criada",
+        changes: [
+          `Responsável inicial: ${ticket.assignee}`,
+          `Prioridade inicial: ${ticket.priority}`,
+          `Prazo inicial: ${ticket.dueAt}`
+        ]
+      })
     }));
     res.status(201).json({ data: ticket });
   }));
@@ -181,131 +184,95 @@ export function createApp(repository: TicketRepository) {
   app.patch("/api/tickets/:id/status", asyncRoute(async (req, res) => {
     const ticketId = getTicketId(req);
     const input = updateStatusSchema.parse(req.body);
-    const tickets = await repository.findAll();
-    const index = tickets.findIndex((ticket) => ticket.id === ticketId);
-
-    if (index === -1) {
+    const result = await repository.changeTicket(ticketId, (current) => {
+      if (!current) return undefined;
+      const ticket: Ticket = {
+        ...current,
+        status: input.status,
+        resolution: input.resolution ?? current.resolution,
+        updatedAt: new Date().toISOString()
+      };
+      return {
+        ticket,
+        event: createTicketEvent({
+          ticketId,
+          type: "status_changed",
+          message: `Status alterado de ${current.status} para ${ticket.status}`,
+          changes: input.resolution ? [`Resolução: ${input.resolution}`] : []
+        })
+      };
+    });
+    if (!result) {
       res.status(404).json({ error: "Tarefa não encontrada" });
       return;
     }
-
-    const current = tickets[index];
-    if (!current) {
-      res.status(404).json({ error: "Tarefa não encontrada" });
-      return;
-    }
-
-    const updated: Ticket = {
-      ...current,
-      status: input.status,
-      resolution: input.resolution ?? current.resolution,
-      updatedAt: new Date().toISOString()
-    };
-
-    tickets[index] = updated;
-    await repository.replaceAll(tickets);
-    await repository.appendEvent(createTicketEvent({
-      ticketId: updated.id,
-      type: "status_changed",
-      message: `Status alterado de ${current.status} para ${updated.status}`,
-      changes: input.resolution ? [`Resolução: ${input.resolution}`] : []
-    }));
-    res.json({ data: updated });
+    res.json({ data: result.ticket });
   }));
 
   app.put("/api/tickets/:id", asyncRoute(async (req, res) => {
     const ticketId = getTicketId(req);
     const input = updateTicketSchema.parse(req.body);
-    const tickets = await repository.findAll();
-    const index = tickets.findIndex((ticket) => ticket.id === ticketId);
-
-    if (index === -1) {
+    const result = await repository.changeTicket(ticketId, (current) => {
+      if (!current) return undefined;
+      const ticket: Ticket = {
+        ...current,
+        ...input,
+        tags: input.tags ?? current.tags,
+        resolution: input.resolution ?? current.resolution,
+        updatedAt: new Date().toISOString()
+      };
+      const changes = describeTicketChanges(current, ticket);
+      return {
+        ticket,
+        event: changes.length > 0 ? createTicketEvent({
+          ticketId,
+          type: "updated",
+          message: "Campos da tarefa atualizados",
+          changes
+        }) : undefined
+      };
+    });
+    if (!result) {
       res.status(404).json({ error: "Tarefa não encontrada" });
       return;
     }
-
-    const current = tickets[index];
-    if (!current) {
-      res.status(404).json({ error: "Tarefa não encontrada" });
-      return;
-    }
-
-    const updated: Ticket = {
-      ...current,
-      ...input,
-      tags: input.tags ?? current.tags,
-      resolution: input.resolution ?? current.resolution,
-      updatedAt: new Date().toISOString()
-    };
-
-    tickets[index] = updated;
-    await repository.replaceAll(tickets);
-    const changes = describeTicketChanges(current, updated);
-    if (changes.length > 0) {
-      await repository.appendEvent(createTicketEvent({
-        ticketId: updated.id,
-        type: "updated",
-        message: "Campos da tarefa atualizados",
-        changes
-      }));
-    }
-    res.json({ data: updated });
+    res.json({ data: result.ticket });
   }));
 
   app.post("/api/tickets/:id/comments", asyncRoute(async (req, res) => {
     const ticketId = getTicketId(req);
     const input = createCommentSchema.parse(req.body);
-    const tickets = await repository.findAll();
-    const index = tickets.findIndex((ticket) => ticket.id === ticketId);
-
-    if (index === -1) {
+    const result = await repository.changeTicket(ticketId, (current) => current ? {
+      ticket: { ...current, updatedAt: new Date().toISOString() },
+      event: createTicketEvent({
+        ticketId,
+        type: "comment_added",
+        actor: input.actor,
+        message: input.message,
+        changes: []
+      })
+    } : undefined);
+    if (!result) {
       res.status(404).json({ error: "Tarefa não encontrada" });
       return;
     }
-
-    const current = tickets[index];
-    if (!current) {
-      res.status(404).json({ error: "Tarefa não encontrada" });
-      return;
-    }
-
-    const updated: Ticket = {
-      ...current,
-      updatedAt: new Date().toISOString()
-    };
-    tickets[index] = updated;
-    await repository.replaceAll(tickets);
-
-    const event = createTicketEvent({
-      ticketId: current.id,
-      type: "comment_added",
-      actor: input.actor,
-      message: input.message,
-      changes: []
-    });
-    await repository.appendEvent(event);
-    res.status(201).json({ data: event });
+    res.status(201).json({ data: result.event });
   }));
 
   app.delete("/api/tickets/:id", asyncRoute(async (req, res) => {
     const ticketId = getTicketId(req);
-    const tickets = await repository.findAll();
-    const ticket = tickets.find((item) => item.id === ticketId);
-    const nextTickets = tickets.filter((ticket) => ticket.id !== ticketId);
-
-    if (nextTickets.length === tickets.length) {
-      res.status(404).json({ error: "Tarefa não encontrada" });
-      return;
-    }
-
-    await repository.replaceAll(nextTickets);
-    if (ticket) {
-      await repository.appendEvent(createTicketEvent({
-        ticketId: ticket.id,
+    const result = await repository.changeTicket(ticketId, (ticket) => ticket ? {
+      ticket: null,
+      event: createTicketEvent({
+        ticketId,
         type: "deleted",
         message: `Tarefa excluída: ${ticket.title}`,
         changes: [`Último responsável: ${ticket.assignee}`]
-      }));
+      })
+    } : undefined);
+    if (!result) {
+      res.status(404).json({ error: "Tarefa não encontrada" });
+      return;
     }
     res.status(204).send();
   }));
@@ -313,6 +280,12 @@ export function createApp(repository: TicketRepository) {
   app.use((error: unknown, _req: Request, res: Response, _next: NextFunction) => {
     if (error && typeof error === "object" && "issues" in error) {
       res.status(400).json({ error: "Validation failed", details: error });
+      return;
+    }
+
+    if (error && typeof error === "object" && "status" in error
+      && (error.status === 400 || error.status === 413 || error.status === 415)) {
+      res.status(error.status).json({ error: "Invalid request body or parameters" });
       return;
     }
 
