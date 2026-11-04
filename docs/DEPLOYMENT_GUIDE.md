@@ -13,7 +13,7 @@ npm ci
 npm run dev
 ```
 
-A web usa a porta 5173 e a API usa `http://127.0.0.1:3333`. A API escuta somente no próprio computador por padrão. Requisições de navegador com origem diferente de `http://localhost:5173` ou `http://127.0.0.1:5173` são rejeitadas antes das operações.
+A web usa a porta 5173 e a API usa `http://127.0.0.1:3333`. A API escuta somente no próprio computador por padrão e aceita requisições com endereço local. Requisições de navegador com origem diferente de `http://localhost:5173` ou `http://127.0.0.1:5173` são rejeitadas antes das operações.
 
 Isso não autentica usuários: processos locais e clientes sem cabeçalho Origin continuam acessando a API. Não use dados reais ou credenciais.
 
@@ -30,4 +30,4 @@ Variáveis: `PORT`, `OPSFLOW_HOST`, `OPSFLOW_DB_PATH` e `OPSFLOW_SEED_PATH`. Alt
 
 ## Limites
 
-Controle de acesso, identidade confiável no histórico e consistência entre alterações e eventos ainda precisam de revisão antes de qualquer uso operacional. Os testes locais não certificam segurança de produção.
+O SQLite grava cada alteração de tarefa e seu evento de histórico na mesma transação. Antes de qualquer uso operacional, o sistema ainda precisa de controle de acesso e de vincular os eventos a usuários autenticados.

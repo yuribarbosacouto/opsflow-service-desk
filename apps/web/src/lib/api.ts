@@ -9,7 +9,7 @@ import type {
   TicketStatus,
   UpdateTicketInput
 } from "@opsflow/domain";
-import { filterTickets, getTicketInsights, getTicketStats } from "@opsflow/domain";
+import { filterTickets, getDueDateForPriority, getTicketInsights, getTicketStats } from "@opsflow/domain";
 import { demoTickets } from "../data/demoTickets";
 
 type ApiResponse<T> = {
@@ -145,7 +145,7 @@ export async function createTicket(input: CreateTicketInput): Promise<Ticket> {
       assignee: input.assignee ?? "Yuri Barbosa",
       createdAt: now,
       updatedAt: now,
-      dueAt: input.dueAt ?? now
+      dueAt: input.dueAt ?? getDueDateForPriority(input.priority, new Date(now))
     };
     demoState = [ticket, ...demoState];
     appendDemoEvent({

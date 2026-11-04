@@ -17,4 +17,15 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Review dependency changes
+        if: ${{ !github.event.repository.private }}
         uses: actions/dependency-review-action@v5
+
+      - name: Set up Node for private repositories
+        if: ${{ github.event.repository.private }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Audit lockfile for private repositories
+        if: ${{ github.event.repository.private }}
+        run: npm audit --package-lock-only --audit-level=moderate
