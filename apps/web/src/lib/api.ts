@@ -20,8 +20,54 @@ const apiBase = import.meta.env.VITE_API_URL ?? "";
 const isBrowser = typeof window !== "undefined";
 const isLocalHost = isBrowser && ["localhost", "127.0.0.1"].includes(window.location.hostname);
 const useStaticDemo = isBrowser && !apiBase && !isLocalHost;
-let demoState = structuredClone(demoTickets);
-let demoEvents = createDemoEvents(demoState);
+const demoStorageKey = "opsflow-demo-v1";
+
+type StoredDemo = { tickets: Ticket[]; events: TicketEvent[] };
+
+function readStoredDemo(): StoredDemo | undefined {
+  if (!useStaticDemo) return undefined;
+  try {
+    const raw = window.localStorage.getItem(demoStorageKey);
+    if (!raw) return undefined;
+    const parsed: unknown = JSON.parse(raw);
+    if (
+      !parsed || typeof parsed !== "object" ||
+      !("tickets" in parsed) || !Array.isArray(parsed.tickets) ||
+      !("events" in parsed) || !Array.isArray(parsed.events)
+    ) return undefined;
+    return parsed as StoredDemo;
+  } catch {
+    return undefined;
+  }
+}
+
+const savedDemo = readStoredDemo();
+let demoState = savedDemo?.tickets ?? structuredClone(demoTickets);
+let demoEvents = savedDemo?.events ?? createDemoEvents(demoState);
+
+function persistDemo(): void {
+  if (!useStaticDemo) return;
+  try {
+    window.localStorage.setItem(demoStorageKey, JSON.stringify({ tickets: demoState, events: demoEvents }));
+  } catch {
+    // Storage can be disabled or full: keep the demonstration usable in memory.
+  }
+}
+
+export function isOnlineDemo(): boolean {
+  return useStaticDemo;
+}
+
+export function resetOnlineDemo(): void {
+  if (!useStaticDemo) return;
+  demoState = structuredClone(demoTickets);
+  demoEvents = createDemoEvents(demoState);
+  try {
+    window.localStorage.removeItem(demoStorageKey);
+  } catch {
+    // Reset still applies to the in-memory session.
+  }
+}
 
 function sortByDueDate(tickets: Ticket[]): Ticket[] {
   return tickets
@@ -68,6 +114,7 @@ function appendDemoEvent(event: Omit<TicketEvent, "id" | "createdAt" | "actor"> 
     ...eventInput
   };
   demoEvents = [nextEvent, ...demoEvents];
+  persistDemo();
   return nextEvent;
 }
 
@@ -187,6 +234,7 @@ export async function updateTicket(id: string, input: UpdateTicketInput): Promis
         changes: changedKeys.map((key) => `${key} alterado`)
       });
     }
+    persistDemo();
     return updated;
   }
 
@@ -219,6 +267,7 @@ export async function updateTicketStatus(id: string, status: TicketStatus): Prom
 
 export async function addTicketComment(id: string, input: CreateCommentInput): Promise<TicketEvent> {
   if (useStaticDemo) {
+    if (!demoState.some((ticket) => ticket.id === id)) throw new Error("Task not found");
     demoState = demoState.map((ticket) => ticket.id === id ? { ...ticket, updatedAt: new Date().toISOString() } : ticket);
     return appendDemoEvent({
       ticketId: id,
