@@ -4,7 +4,7 @@ Este projeto é um estudo com dados fictícios. A API não tem autenticação ou
 
 ## Web pública
 
-A demonstração do GitHub Pages usa dados demonstrativos versionados e não exige publicar a API local.
+A demonstração do GitHub Pages usa dados demonstrativos versionados e não exige publicar a API local. Visitantes podem criar, editar, mudar o status, comentar e excluir tarefas; alterações e eventos são salvos apenas no armazenamento local do navegador e sobrevivem a recarregamentos. Cada navegador possui uma cópia independente: não existe sincronização entre usuários ou persistência em servidor. O botão **Restaurar demo** descarta as alterações locais e repõe os dados fictícios iniciais. Limpar os dados do site também elimina a cópia local. Não insira informações reais ou confidenciais na demonstração pública.
 
 ## API local
 
