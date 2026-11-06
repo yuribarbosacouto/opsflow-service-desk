@@ -16,7 +16,7 @@ concurrency:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -38,6 +38,11 @@ jobs:
 
       - name: Build static demo
         run: npm run build -w @opsflow/web -- --mode github-pages
+
+      - name: Verify generated site
+        run: |
+          test -s apps/web/dist/index.html
+          test -d apps/web/dist/assets
 
       - name: Setup Pages
         uses: actions/configure-pages@v5
