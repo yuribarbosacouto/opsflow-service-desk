@@ -43,7 +43,7 @@ import {
   type TicketStatus,
   type UpdateTicketInput
 } from "@opsflow/domain";
-import { addTicketComment, createTicket, deleteTicket, fetchInsights, fetchStats, fetchTicketEvents, fetchTickets, updateTicket, updateTicketStatus } from "./lib/api";
+import { addTicketComment, createTicket, deleteTicket, fetchInsights, fetchStats, fetchTicketEvents, fetchTickets, isOnlineDemo, resetOnlineDemo, updateTicket, updateTicketStatus } from "./lib/api";
 import {
   categoryLabel,
   formatDateTime,
@@ -546,6 +546,23 @@ export function App() {
                 <RefreshCcw aria-hidden="true" className="h-4 w-4" />
                 Atualizar
               </button>
+              {isOnlineDemo() && (
+                <button
+                  className="inline-flex items-center gap-2 rounded-md border border-slate-200 bg-white px-3 py-2 text-sm font-medium text-slate-700 shadow-sm hover:bg-slate-50"
+                  type="button"
+                  onClick={() => {
+                    if (!window.confirm("Restaurar os dados fictícios originais? Suas alterações nesta demonstração serão perdidas.")) return;
+                    resetOnlineDemo();
+                    setSelectedId(undefined);
+                    setTicketEvents([]);
+                    setEventsRefreshKey((value) => value + 1);
+                    void loadData(filters);
+                  }}
+                >
+                  <RefreshCcw aria-hidden="true" className="h-4 w-4" />
+                  Restaurar demo
+                </button>
+              )}
               <button
                 className="hidden items-center gap-2 rounded-md bg-slate-950 px-3 py-2 text-sm font-semibold text-white shadow-sm hover:bg-slate-800 lg:inline-flex"
                 type="button"
